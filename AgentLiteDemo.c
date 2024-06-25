@@ -31,6 +31,10 @@
 #include <arpa/inet.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
+
+
+
 
 /* if you want to use syslog,you should do this:
  *
@@ -57,9 +61,8 @@ char *subDeviceId = "f6cd4bbb1a8ab53acbb595efd0e90199_ABC123456789";
 int sleepTime = 5000;
 //-------------我的变量--------------------
 int socketfd;//网络套接字
-#define SERVER_IP "192.168.1.100" // 替换为设备端的IP地址
-#define SERVER_PORT 12345         // 替换为设备端的端口号
-
+#define GEC6818_IP "192.168.1.161" // 替换为设备端的IP地址
+#define GEC6818_PORT 20001         // 替换为设备端的端口号
 
 void timeSleep(int ms)
 {
@@ -84,29 +87,46 @@ void Test_messageReport()
 
 void Test_propertiesReport()
 {
-	int serviceNum = 1;//����Ҫ�ϱ���service����
+	int serviceNum = 1;
 	ST_IOTA_SERVICE_DATA_INFO services[serviceNum];
 	//-----------udp端口接受拿来转发------------------
-	int value;
 	struct sockaddr_in addr;
+	char rbuf[512]={0};
 	int addrlen = sizeof(addr); //一定要赋值
 
-	int ret = recvfrom(socketfd, &value, sizeof(value),0,(struct sockaddr*)&addr,&addrlen);
+	int ret = recvfrom(socketfd, &rbuf, sizeof(rbuf),0,(struct sockaddr*)&addr,&addrlen);
 	if(ret == -1)
 	{
 		perror("recvfrom error");
 	}
-	printf("===============================接收到设备数据咯=================================================\n");
-	//printf("IP:[%s] Port:[%d]recvfrom:%s ret:%d\n",inet_ntoa(addr.sin_addr),ntohs(addr.sin_port), value,ret);
-	//-----------结束------------------
+	//printf("收到的字符长度是%d,字符串是:%s\n",ret,rbuf);
+
+	//----------解析设备6818发来的字符串-----------------
+	cJSON *received_rbuf = cJSON_Parse(rbuf);
+    if (received_rbuf == NULL) {
+        printf("Error parsing JSON: %s\n", cJSON_GetErrorPtr());
+        return 1;
+    }
+
+	// 从6818的json字符串解析,然后从JSON中获取相应的值
+    int value_temp = cJSON_GetObjectItem(received_rbuf, "temperature")->valueint;
+    int value_humi = cJSON_GetObjectItem(received_rbuf, "humidity")->valueint;
+    int value_LUX = cJSON_GetObjectItem(received_rbuf, "lux")->valueint;
+	int value_robot = cJSON_GetObjectItem(received_rbuf, "robot")->valueint;
+    int value_light = cJSON_GetObjectItem(received_rbuf, "light")->valueint;
+	
+	//设备端的定义用反了,这边小运算一下
+	value_light=!value_light;
+	value_robot=!value_robot;
 
 	//----封装塞进去json的文件------
 	cJSON *root;
 	root = cJSON_CreateObject();
-	cJSON_AddNumberToObject(root, "temp",value);
-	cJSON_AddNumberToObject(root, "humi",(rand()%100));
-	cJSON_AddBoolToObject(root, "LED",0);
-	cJSON_AddBoolToObject(root, "bot", 0);
+	cJSON_AddNumberToObject(root, "temp",value_temp);
+	cJSON_AddNumberToObject(root, "humi",value_humi);
+	cJSON_AddNumberToObject(root, "LUX",value_LUX);
+	cJSON_AddBoolToObject(root, "LED",value_light);
+	cJSON_AddBoolToObject(root, "bot", value_robot);
 	//----封装塞进去json的文件结束-------
 	char *payload;
 	payload = cJSON_Print(root);
@@ -149,11 +169,7 @@ void Test_batchPropertiesReport()
 
 
 
-//	char *device2_service1 = "{\"AA\":\"2\",\"BB\":\"4\"}";
-//	devices[1].device_id = "subDevices22222";
-//	devices[1].services[0].event_time = "d2s1";
-//	devices[1].services[0].service_id = "device2_service11111111";
-//	devices[1].services[0].properties = device2_service1;
+
 
 
 	int messageId = IOTA_BatchPropertiesReport(devices, deviceNum, serviceList);
@@ -315,6 +331,28 @@ void handleCommandRequest(void* context, int messageId, int code, char *message,
 	//printf("------------我进来咯----------------------\n");
 	JSON * root =  JSON_Parse(message);  //Convert string to JSON
 
+	int size = 0;
+	for (int i = 0; *(message + size) != '\0'; i++)
+	{
+		size++;
+	}
+	printf("%d\n", size);
+
+    struct sockaddr_in serveraddr;
+    serveraddr.sin_family = AF_INET;
+    serveraddr.sin_port = htons(GEC6818_PORT);
+    serveraddr.sin_addr.s_addr = inet_addr(GEC6818_IP);
+
+	char buf[2024];
+	int ret = sendto(socketfd, message, size, 0, (struct sockaddr *)&serveraddr, sizeof(serveraddr));
+	printf("ret =%d\n", ret);
+	if (ret == -1)
+	{
+		perror("sendto error");
+		return -1;
+	}
+  
+
 	char* object_device_id = JSON_GetStringFromObject(root, "object_device_id", "-1");     //get value of object_device_id
 	printfLog(EN_LOG_LEVEL_INFO, "AgentLiteDemo: handleCommandRequest(), object_device_id %s\n", object_device_id);
 
@@ -326,15 +364,7 @@ void handleCommandRequest(void* context, int messageId, int code, char *message,
 
 	JSON* paras = JSON_GetObjectFromObject(root, "paras");       //get value of data
 	printfLog(EN_LOG_LEVEL_INFO, "AgentLiteDemo: handleCommandRequest(), id %s\n", paras);
-	int led = JSON_GetIntFromObject(paras, "led", -1);  // Get the temp value
-	if (led == -1) 
-	{
-		printfLog(EN_LOG_LEVEL_ERROR, "AgentLiteDemo: temp value not found or invalid\n");
-	} 
-	else 
-	{
-		printf("我的led布尔变量是%s\n",led ? "true":"false");
-	}
+
 
 	if (paras)
 	{
@@ -586,15 +616,18 @@ void setMyCallbacks()
 
 void myPrintLog(int level, char* format, va_list args)
 {
-    vprintf(format, args); //��־��ӡ�ڿ���̨
+    vprintf(format, args); //
 /*if you want to printf log in system log files,you can do this:
  *
  * vsyslog(level, format, args);
  * */
 }
-//udp和设备端的转发数据的---初始化函数
+
+
+//ubuntu作为转发服务器接收开发板的数据
 void socket_init()
 {
+	//接受的upd套接字
 	//1.创建套接字
     socketfd = socket(AF_INET,SOCK_DGRAM,0);
     if(socketfd == -1)
@@ -616,28 +649,33 @@ void socket_init()
         return -1;
     }
 }
-//我上传数据到华为云服务器的线程函数
-void* thread_RecInfo_function(void* arg)
-{
-    while(1)
-	{
-		//printf("Hello from new thread!\n");
-		Test_propertiesReport();
-		sleep(5);
-	}
-	
-    return NULL;
-}
 
-//创建一个专门发送数据到设备端的发送线程函数
+
+
+//Ubuntu作为服务器发送信息到开发板的函数
 void* thread_SendInfo_function(void* arg)
 {
-	bzero(sbuf,100);
-		printf("请输入要发送的信息!\n");
-		scanf("%s",sbuf);
-		//发送出去
-		sendto(socketfd,sbuf,strlen(sbuf),0,(struct sockaddr *)&otheraddr,sizeof(otheraddr));
 
+	//发送的套接字
+	//定义ipv4地址结构体变量存放开发板的ip和接收端口号
+	struct sockaddr_in serveraddr;
+	serveraddr.sin_family = AF_INET;
+	serveraddr.sin_port = htons(GEC6818_PORT);
+	serveraddr.sin_addr.s_addr = inet_addr(GEC6818_IP);
+
+	struct tm* time_info;
+	time_t raw_time;
+	int ret;
+	char buf[64];
+	time(&raw_time);
+	time_info = localtime(&raw_time);
+	strftime(buf, 64, "TIME:%Y-%m-%d %H:%M:%S", time_info);
+	ret = sendto(socketfd, buf, strlen(buf), 0, (struct sockaddr *)&serveraddr, sizeof(serveraddr));
+	printf("Current time: %s\n", buf);
+	if(ret==-1)
+	{
+		perror("sendto");
+	}
 }
 
 
@@ -675,46 +713,19 @@ int main(int argc, char **argv)
         printfLog(EN_LOG_LEVEL_ERROR, "AgentLiteDemo: IOTA_Auth() error, Auth failed, result %d\n", ret);
     }
 
-	//创建一个线程
-	pthread_t new_id; // 创建线程标识符
-	pthread_create(&new_id, NULL, thread_RecInfo_function, NULL);
+	//每次连接开发板就发送一次时间数据
+	thread_SendInfo_function(NULL);
+
 	
-
-/*  
-	timeSleep(1500);
-    int count = 0;
-    while(count < 10000)
-    {
-
-//        //message up
-//        Test_messageReport();
-
-        //properties report
-        Test_propertiesReport();
-
-//        //batchProperties report
-//        Test_batchPropertiesReport();
-//
-//        //command response
-//        Test_commandResponse("1005");
-//
-//        timeSleep(1500);
-//
-//        //propSetResponse
-//        Test_propSetResponse("1006");
-//
-//        timeSleep(1500);
-//
-//        //propSetResponse
-//        Test_propGetResponse("1007");
-
-        timeSleep(sleepTime);
-
-        count++;
-	} 
-*/
+	while (1)
+	{
 
 
+		Test_propertiesReport();
+
+		timeSleep(sleepTime);
+
+	}
 
     while (1)
 	{
